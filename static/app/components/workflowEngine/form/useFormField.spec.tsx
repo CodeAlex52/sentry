@@ -75,7 +75,7 @@ describe('useFormField', () => {
     expect(result.current).toBe('updated value');
   });
 
-  it('handles fields that are removed after subscription', () => {
+  it('handles fields that are removed and added again after subscription', () => {
     model.setInitialData({targetField: 'initial'});
 
     const {result} = renderHook(() => useFormField('targetField'), {
@@ -88,5 +88,9 @@ describe('useFormField', () => {
       model.removeField('targetField');
     });
     expect(result.current).toBe('');
+    act(() => {
+      model.setValue('targetField', 'restored');
+    });
+    expect(result.current).toBe('restored');
   });
 });

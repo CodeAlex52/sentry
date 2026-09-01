@@ -3,7 +3,11 @@ import {uuid4} from '@sentry/core';
 import type {FieldValue} from 'sentry/components/forms/model';
 import {t} from 'sentry/locale';
 import {ActionType, type Action} from 'sentry/types/workflowEngine/actions';
-import type {Automation, NewAutomation} from 'sentry/types/workflowEngine/automations';
+import type {
+  AlertPreviewRequest,
+  Automation,
+  NewAutomation,
+} from 'sentry/types/workflowEngine/automations';
 import type {
   DataCondition,
   DataConditionGroup,
@@ -71,6 +75,16 @@ const stripDataConditionGroupId = (group: any) => {
   };
 };
 
+const stripPreviewConditionGroup = (
+  group: DataConditionGroup
+): AlertPreviewRequest['triggers'] => ({
+  logicType: group.logicType,
+  conditions: group.conditions.map(condition => {
+    const {type, comparison} = stripDataConditionId(condition);
+    return {type, comparison};
+  }),
+});
+
 export function getNewAutomationData({
   data,
   state,
@@ -88,6 +102,36 @@ export function getNewAutomationData({
     },
     detectorIds: data.detectorIds,
     enabled: data.enabled,
+  };
+}
+
+export function getAlertPreviewRequest({
+  frequency,
+  projectIds,
+  state,
+}: {
+  frequency: number | null;
+  projectIds: readonly string[];
+  state: AutomationBuilderState;
+}): AlertPreviewRequest | null {
+  if (
+    projectIds.length === 0 ||
+    state.triggers.conditions.length === 0 ||
+    state.actionFilters.length === 0 ||
+    [state.triggers, ...state.actionFilters].some(group =>
+      group.conditions.some(condition =>
+        dataConditionNodesMap.get(condition.type)?.validate?.({condition})
+      )
+    )
+  ) {
+    return null;
+  }
+
+  return {
+    projectIds: projectIds.map(Number),
+    config: {frequency: frequency ?? undefined},
+    triggers: stripPreviewConditionGroup(state.triggers),
+    actionFilters: state.actionFilters.map(stripPreviewConditionGroup),
   };
 }
 

@@ -17,6 +17,11 @@ interface NewAutomationDataConditionGroup extends Omit<
   actions?: NewAutomationAction[];
 }
 
+interface AlertPreviewDataConditionGroup {
+  conditions: Array<Pick<DataCondition, 'comparison' | 'type'>>;
+  logicType: DataConditionGroup['logicType'];
+}
+
 interface AutomationBase {
   config: {frequency?: number};
   detectorIds: string[];
@@ -38,6 +43,23 @@ export interface Automation extends Readonly<AutomationBase> {
   readonly id: string;
   readonly lastTriggered: string;
   readonly triggers: DataConditionGroup | null;
+}
+
+export type AlertPreviewRequest = {
+  actionFilters: AlertPreviewDataConditionGroup[];
+  config: AutomationBase['config'];
+  projectIds: number[];
+  triggers: AlertPreviewDataConditionGroup;
+};
+
+interface AlertPreviewResult {
+  groupId: string;
+  isThrottled: boolean;
+  triggeredAt: string;
+}
+
+export interface AlertPreview {
+  results: AlertPreviewResult[];
 }
 
 export interface AutomationFireHistory {

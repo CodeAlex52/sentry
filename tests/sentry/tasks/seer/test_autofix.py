@@ -1,17 +1,13 @@
 from datetime import timedelta
-from unittest.mock import MagicMock, Mock, call, patch
+from unittest.mock import ANY, MagicMock, Mock, call, patch
 
 import pytest
 from django.utils import timezone
 
-from sentry.seer.autofix.constants import SeerAutomationSource
+from sentry.seer.autofix.constants import IssueSummaryTriggerPath, SeerAutomationSource
 from sentry.seer.autofix.exceptions import IssueSummaryUnavailable
 from sentry.seer.autofix.utils import get_seer_seat_based_tier_cache_key
-from sentry.seer.models import (
-    IssueSummary,
-    SummarizeIssueResponse,
-    SummarizeIssueScores,
-)
+from sentry.seer.models import IssueSummary
 from sentry.seer.models.project_repository import SeerProjectRepository
 from sentry.seer.models.workflow import (
     SeerWorkflowConfig,
@@ -20,8 +16,9 @@ from sentry.seer.models.workflow import (
 )
 from sentry.tasks.seer.autofix import (
     configure_seer_for_existing_org,
-    generate_issue_summary_only,
+    generate_issue_summary_and_score,
     generate_summary_and_run_automation,
+    run_issue_automation,
 )
 from sentry.tasks.seer.autofix_issue_data import (
     FEATURE_FLAG,
@@ -37,41 +34,67 @@ from sentry.utils.cache import cache
 from sentry.utils.locking import UnableToAcquireLock
 
 
-class TestGenerateIssueSummaryOnly(SentryTestCase):
-    @patch("sentry.seer.autofix.issue_summary._generate_fixability_score")
-    @patch("sentry.tasks.seer.autofix.get_issue_summary")
+class TestGenerateIssueSummaryAndScore(SentryTestCase):
+    @patch("sentry.tasks.seer.autofix.get_and_update_group_fixability_score")
+    @patch("sentry.tasks.seer.autofix.generate_issue_summary")
+    @patch("sentry.tasks.seer.autofix.get_issue_summary", return_value=None)
     def test_generates_fixability_score_after_summary(
-        self, mock_get_issue_summary: MagicMock, mock_generate_fixability: MagicMock
+        self,
+        mock_get_summary: MagicMock,
+        mock_generate_summary: MagicMock,
+        mock_get_score: MagicMock,
     ) -> None:
-        """Test that fixability score is generated after issue summary is fetched."""
+        group = self.create_group(project=self.project)
+        generate_issue_summary_and_score(group.id)
+
+        mock_get_summary.assert_called_once_with(group)
+        mock_generate_summary.assert_called_once_with(
+            group=group, source=SeerAutomationSource.POST_PROCESS
+        )
+        mock_get_score.assert_called_once_with(group, force_generate=True)
+
+    @patch("sentry.tasks.seer.autofix.get_and_update_group_fixability_score")
+    @patch("sentry.tasks.seer.autofix.generate_issue_summary")
+    @patch("sentry.tasks.seer.autofix.get_issue_summary", return_value=None)
+    def test_uses_provided_source(
+        self,
+        mock_get_summary: MagicMock,
+        mock_generate_summary: MagicMock,
+        mock_get_score: MagicMock,
+    ) -> None:
         group = self.create_group(project=self.project)
 
-        mock_get_issue_summary.return_value = IssueSummary(
-            group_id=str(group.id),
-            headline="Test Headline",
-            whats_wrong="Test whats wrong",
-            trace="Test trace",
-            possible_cause="Test cause",
-            event_id="event-id",
-        )
-        mock_generate_fixability.return_value = SummarizeIssueResponse(
-            group_id=str(group.id),
-            headline="Test",
-            whats_wrong="Test",
-            trace="Test",
-            possible_cause="Test",
-            scores=SummarizeIssueScores(fixability_score=0.75),
+        generate_issue_summary_and_score(
+            group.id,
+            source=SeerAutomationSource.AGENTIC_TRIAGE.value,
+            force_generate_score=False,
         )
 
-        generate_issue_summary_only(group.id)
-
-        mock_get_issue_summary.assert_called_once_with(
-            group=group, source=SeerAutomationSource.POST_PROCESS, should_run_automation=False
+        mock_get_summary.assert_called_once_with(group)
+        mock_generate_summary.assert_called_once_with(
+            group=group,
+            source=SeerAutomationSource.AGENTIC_TRIAGE,
         )
-        mock_generate_fixability.assert_called_once()
+        mock_get_score.assert_called_once_with(group, force_generate=False)
 
-        group.refresh_from_db()
-        assert group.seer_fixability_score == 0.75
+    @patch("sentry.tasks.seer.autofix.get_and_update_group_fixability_score")
+    @patch("sentry.tasks.seer.autofix.generate_issue_summary", side_effect=UnableToAcquireLock)
+    @patch("sentry.tasks.seer.autofix.get_issue_summary", return_value=None)
+    def test_propagates_summary_failure(
+        self,
+        mock_get_summary: MagicMock,
+        mock_generate_summary: MagicMock,
+        mock_get_score: MagicMock,
+    ) -> None:
+        group = self.create_group(project=self.project)
+
+        with pytest.raises(UnableToAcquireLock):
+            generate_issue_summary_and_score(group.id)
+
+        mock_generate_summary.assert_called_once_with(
+            group=group, source=SeerAutomationSource.POST_PROCESS
+        )
+        mock_get_score.assert_not_called()
 
     @patch("sentry.tasks.seer.autofix.get_and_update_group_fixability_score")
     @patch(
@@ -85,60 +108,256 @@ class TestGenerateIssueSummaryOnly(SentryTestCase):
     ) -> None:
         group = self.create_group(project=self.project)
 
-        generate_issue_summary_only(group.id)
+        generate_issue_summary_and_score(group.id)
 
-        mock_get_summary.assert_called_once_with(
-            group=group,
-            source=SeerAutomationSource.POST_PROCESS,
-            should_run_automation=False,
-        )
         mock_get_score.assert_not_called()
 
     @patch("sentry.tasks.seer.autofix.get_and_update_group_fixability_score")
-    @patch("sentry.tasks.seer.autofix.get_issue_summary", side_effect=UnableToAcquireLock)
-    def test_propagates_transient_summary_failure(
+    @patch("sentry.tasks.seer.autofix.generate_issue_summary")
+    @patch("sentry.tasks.seer.autofix.get_issue_summary")
+    def test_cached_summary_does_not_regenerate_but_still_scores(
         self,
         mock_get_summary: MagicMock,
+        mock_generate_summary: MagicMock,
+        mock_get_score: MagicMock,
+    ) -> None:
+        group = self.create_group(project=self.project)
+        mock_get_summary.return_value = IssueSummary(
+            group_id=str(group.id), event_id="event-id", headline="Cached headline"
+        )
+
+        generate_issue_summary_and_score(group.id, force_generate_score=False)
+
+        mock_get_summary.assert_called_once_with(group)
+        mock_generate_summary.assert_not_called()
+        mock_get_score.assert_called_once_with(group, force_generate=False)
+
+    @patch("sentry.tasks.seer.autofix.get_and_update_group_fixability_score")
+    @patch("sentry.tasks.seer.autofix.generate_issue_summary", side_effect=IssueSummaryUnavailable)
+    @patch("sentry.tasks.seer.autofix.get_issue_summary", return_value=None)
+    def test_does_not_score_when_generation_is_unavailable(
+        self,
+        mock_get_summary: MagicMock,
+        mock_generate_summary: MagicMock,
         mock_get_score: MagicMock,
     ) -> None:
         group = self.create_group(project=self.project)
 
-        with pytest.raises(UnableToAcquireLock):
-            generate_issue_summary_only(group.id)
+        generate_issue_summary_and_score(group.id)
 
-        mock_get_summary.assert_called_once_with(
-            group=group,
-            source=SeerAutomationSource.POST_PROCESS,
-            should_run_automation=False,
-        )
+        mock_generate_summary.assert_called_once()
         mock_get_score.assert_not_called()
 
 
 class TestGenerateSummaryAndRunAutomation(SentryTestCase):
+    @patch("sentry.tasks.seer.autofix.run_issue_automation.delay")
+    @patch("sentry.tasks.seer.autofix.get_and_update_group_fixability_score")
+    @patch("sentry.tasks.seer.autofix.generate_issue_summary")
+    @patch("sentry.tasks.seer.autofix.get_issue_summary", return_value=None)
+    def test_generates_summary_and_score_before_scheduling_automation(
+        self,
+        mock_get_summary: MagicMock,
+        mock_generate_summary: MagicMock,
+        mock_get_score: MagicMock,
+        mock_run_issue_automation: MagicMock,
+    ) -> None:
+        group = self.create_group(project=self.project)
+        mock_generate_summary.return_value = IssueSummary(
+            group_id=str(group.id), event_id="event-id", headline="Generated headline"
+        )
+        calls = Mock()
+        calls.attach_mock(mock_get_summary, "get_summary")
+        calls.attach_mock(mock_generate_summary, "generate_summary")
+        calls.attach_mock(mock_get_score, "get_score")
+        calls.attach_mock(mock_run_issue_automation, "run_automation")
+
+        generate_summary_and_run_automation(
+            group.id,
+            trigger_path=IssueSummaryTriggerPath.POST_PROCESS,
+        )
+
+        assert calls.mock_calls == [
+            call.get_summary(group),
+            call.generate_summary(group=group, source=SeerAutomationSource.POST_PROCESS),
+            call.get_score(group, force_generate=False),
+            call.run_automation(
+                group.id,
+                trigger_path=IssueSummaryTriggerPath.POST_PROCESS,
+                event_id="event-id",
+            ),
+        ]
+
+    @patch("sentry.tasks.seer.autofix.run_issue_automation.delay")
+    @patch("sentry.tasks.seer.autofix.get_and_update_group_fixability_score")
     @patch(
         "sentry.tasks.seer.autofix.get_issue_summary",
         side_effect=IssueSummaryUnavailable,
     )
-    def test_stops_when_summary_is_unavailable(self, mock_get_summary: MagicMock) -> None:
+    def test_stops_when_summary_is_unavailable(
+        self,
+        mock_get_summary: MagicMock,
+        mock_get_score: MagicMock,
+        mock_run_issue_automation: MagicMock,
+    ) -> None:
         group = self.create_group(project=self.project)
 
         generate_summary_and_run_automation(group.id)
 
-        mock_get_summary.assert_called_once_with(
-            group=group,
-            source=SeerAutomationSource.POST_PROCESS,
+        mock_get_summary.assert_called_once_with(group)
+        mock_get_score.assert_not_called()
+        mock_run_issue_automation.assert_not_called()
+
+    @patch("sentry.tasks.seer.autofix.run_issue_automation.delay")
+    @patch("sentry.tasks.seer.autofix.get_and_update_group_fixability_score")
+    @patch("sentry.tasks.seer.autofix.generate_issue_summary", side_effect=IssueSummaryUnavailable)
+    @patch("sentry.tasks.seer.autofix.get_issue_summary", return_value=None)
+    def test_stops_when_generation_is_unavailable(
+        self,
+        mock_get_summary: MagicMock,
+        mock_generate_summary: MagicMock,
+        mock_get_score: MagicMock,
+        mock_run_issue_automation: MagicMock,
+    ) -> None:
+        generate_summary_and_run_automation(self.group.id)
+
+        mock_generate_summary.assert_called_once()
+        mock_get_score.assert_not_called()
+        mock_run_issue_automation.assert_not_called()
+
+    @patch("sentry.tasks.seer.autofix.run_issue_automation.delay")
+    @patch(
+        "sentry.tasks.seer.autofix.get_and_update_group_fixability_score",
+        side_effect=UnableToAcquireLock,
+    )
+    @patch("sentry.tasks.seer.autofix.get_issue_summary")
+    def test_does_not_schedule_automation_when_scoring_fails(
+        self,
+        mock_get_summary: MagicMock,
+        mock_get_score: MagicMock,
+        mock_run_issue_automation: MagicMock,
+    ) -> None:
+        mock_get_summary.return_value = IssueSummary(
+            group_id=str(self.group.id), event_id="event-id", headline="Cached headline"
         )
 
-    @patch("sentry.tasks.seer.autofix.get_issue_summary", side_effect=UnableToAcquireLock)
-    def test_propagates_transient_summary_failure(self, mock_get_summary: MagicMock) -> None:
+        with pytest.raises(UnableToAcquireLock):
+            generate_summary_and_run_automation(self.group.id)
+
+        mock_get_score.assert_called_once_with(self.group, force_generate=False)
+        mock_run_issue_automation.assert_not_called()
+
+    @patch("sentry.tasks.seer.autofix.run_issue_automation.delay")
+    @patch("sentry.tasks.seer.autofix.get_and_update_group_fixability_score")
+    @patch("sentry.tasks.seer.autofix.generate_issue_summary", side_effect=UnableToAcquireLock)
+    @patch("sentry.tasks.seer.autofix.get_issue_summary", return_value=None)
+    def test_propagates_transient_summary_failure(
+        self,
+        mock_get_summary: MagicMock,
+        mock_generate_summary: MagicMock,
+        mock_get_score: MagicMock,
+        mock_run_issue_automation: MagicMock,
+    ) -> None:
         group = self.create_group(project=self.project)
 
         with pytest.raises(UnableToAcquireLock):
             generate_summary_and_run_automation(group.id)
 
-        mock_get_summary.assert_called_once_with(
+        mock_generate_summary.assert_called_once_with(
+            group=group, source=SeerAutomationSource.POST_PROCESS
+        )
+        mock_get_score.assert_not_called()
+        mock_run_issue_automation.assert_not_called()
+
+    @patch("sentry.tasks.seer.autofix.run_issue_automation.delay")
+    @patch("sentry.tasks.seer.autofix.get_and_update_group_fixability_score")
+    @patch("sentry.tasks.seer.autofix.generate_issue_summary")
+    @patch("sentry.tasks.seer.autofix.get_issue_summary")
+    def test_cached_summary_still_scores_and_schedules_automation(
+        self,
+        mock_get_summary: MagicMock,
+        mock_generate_summary: MagicMock,
+        mock_get_score: MagicMock,
+        mock_run_issue_automation: MagicMock,
+    ) -> None:
+        group = self.create_group(project=self.project)
+        mock_get_summary.return_value = IssueSummary(
+            group_id=str(group.id), event_id="event-id", headline="Cached headline"
+        )
+
+        generate_summary_and_run_automation(group.id)
+
+        mock_get_summary.assert_called_once()
+        mock_generate_summary.assert_not_called()
+        mock_get_score.assert_called_once_with(group, force_generate=False)
+        mock_run_issue_automation.assert_called_once_with(
+            group.id,
+            trigger_path=IssueSummaryTriggerPath.UNKNOWN,
+            event_id="event-id",
+        )
+
+
+class TestRunIssueAutomation(SentryTestCase):
+    @patch("sentry.tasks.seer.autofix.eventstore.backend.get_event_by_id")
+    @patch("sentry.tasks.seer.autofix.run_automation")
+    def test_runs_automation_for_summarized_event(
+        self,
+        mock_run_automation: MagicMock,
+        mock_get_event: MagicMock,
+    ) -> None:
+        group = self.create_group(project=self.project)
+        event = Mock(event_id="event-id")
+        mock_get_event.return_value = event
+
+        run_issue_automation(
+            group.id,
+            trigger_path=IssueSummaryTriggerPath.POST_PROCESS,
+            event_id=event.event_id,
+        )
+
+        mock_get_event.assert_called_once_with(
+            group.project_id,
+            event.event_id,
+            group_id=group.id,
+        )
+        mock_run_automation.assert_called_once_with(
             group=group,
+            user=ANY,
+            event=event,
             source=SeerAutomationSource.POST_PROCESS,
+        )
+
+    @patch("sentry.tasks.seer.autofix.run_automation")
+    def test_legacy_message_falls_back_to_latest_event(
+        self, mock_run_automation: MagicMock
+    ) -> None:
+        group = self.create_group(project=self.project)
+        event = Mock(event_id="event-id")
+
+        with patch.object(group.__class__, "get_latest_event", return_value=event):
+            run_issue_automation(group.id, trigger_path=IssueSummaryTriggerPath.POST_PROCESS)
+
+        mock_run_automation.assert_called_once_with(
+            group=group,
+            user=ANY,
+            event=event,
+            source=SeerAutomationSource.POST_PROCESS,
+        )
+
+    @patch("sentry.tasks.seer.autofix.logger.exception")
+    @patch("sentry.tasks.seer.autofix.run_automation", side_effect=Exception("failed"))
+    def test_automation_failure_is_logged(
+        self,
+        mock_run_automation: MagicMock,
+        mock_logger: MagicMock,
+    ) -> None:
+        group = self.create_group(project=self.project)
+
+        with patch.object(group.__class__, "get_latest_event", return_value=Mock()):
+            run_issue_automation(group.id)
+
+        mock_run_automation.assert_called_once()
+        mock_logger.assert_called_once_with(
+            "Error auto-triggering autofix from issue summary", extra={"group_id": group.id}
         )
 
 

@@ -20,7 +20,7 @@ from sentry.seer.autofix.exceptions import (
     IssueSummaryHidden,
     IssueSummarySelfHosted,
 )
-from sentry.seer.autofix.issue_summary import get_issue_summary
+from sentry.seer.autofix.issue_summary import generate_issue_summary, get_issue_summary
 from sentry.types.ratelimit import RateLimit, RateLimitCategory
 from sentry.utils.locking import UnableToAcquireLock
 
@@ -49,12 +49,14 @@ class GroupAiSummaryEndpoint(GroupAiEndpoint):
         force_event_id = data.get("event_id", None)
 
         try:
-            summary_data = get_issue_summary(
-                group=group,
-                user=request.user,
-                force_event_id=force_event_id,
-                source=SeerAutomationSource.ISSUE_DETAILS,
-            )
+            summary_data = None if force_event_id else get_issue_summary(group)
+            if summary_data is None:
+                summary_data = generate_issue_summary(
+                    group=group,
+                    user=request.user,
+                    force_event_id=force_event_id,
+                    source=SeerAutomationSource.ISSUE_DETAILS,
+                )
         except IssueSummaryEventNotFound:
             return Response(
                 {"detail": "Could not find an event for the issue"},

@@ -28,13 +28,16 @@ class GroupAiSummaryEndpointTest(APITestCase, SnubaTestCase):
         return f"/api/0/organizations/{self.organization.slug}/issues/{group_id}/summarize/"
 
     @patch("sentry.seer.endpoints.group_ai_summary.get_issue_summary")
-    def test_endpoint_calls_get_issue_summary(self, mock_get_issue_summary: MagicMock) -> None:
+    @patch("sentry.seer.endpoints.group_ai_summary.generate_issue_summary")
+    def test_endpoint_generates_for_explicit_event_id(
+        self, mock_generate_issue_summary: MagicMock, mock_get_issue_summary: MagicMock
+    ) -> None:
         mock_summary_data = IssueSummary(
             group_id=str(self.group.id),
             event_id="test_event_id",
             headline="Test headline",
         )
-        mock_get_issue_summary.return_value = mock_summary_data
+        mock_generate_issue_summary.return_value = mock_summary_data
 
         response = self.client.post(self.url, data={"event_id": "test_event_id"}, format="json")
 
@@ -42,7 +45,8 @@ class GroupAiSummaryEndpointTest(APITestCase, SnubaTestCase):
         assert response.data["headline"] == mock_summary_data.headline
         assert response.data["groupId"] == mock_summary_data.group_id
         assert response.data["eventId"] == mock_summary_data.event_id
-        mock_get_issue_summary.assert_called_once_with(
+        mock_get_issue_summary.assert_not_called()
+        mock_generate_issue_summary.assert_called_once_with(
             group=self.group,
             user=ANY,
             force_event_id="test_event_id",
@@ -50,7 +54,10 @@ class GroupAiSummaryEndpointTest(APITestCase, SnubaTestCase):
         )
 
     @patch("sentry.seer.endpoints.group_ai_summary.get_issue_summary")
-    def test_endpoint_without_event_id(self, mock_get_issue_summary: MagicMock) -> None:
+    @patch("sentry.seer.endpoints.group_ai_summary.generate_issue_summary")
+    def test_endpoint_returns_cached_summary(
+        self, mock_generate_issue_summary: MagicMock, mock_get_issue_summary: MagicMock
+    ) -> None:
         mock_summary_data = IssueSummary(
             group_id=str(self.group.id),
             event_id="test_event_id",
@@ -62,24 +69,42 @@ class GroupAiSummaryEndpointTest(APITestCase, SnubaTestCase):
 
         assert response.status_code == 200
         assert response.data["headline"] == mock_summary_data.headline
-        mock_get_issue_summary.assert_called_once_with(
+        mock_get_issue_summary.assert_called_once_with(self.group)
+        mock_generate_issue_summary.assert_not_called()
+
+    @patch("sentry.seer.endpoints.group_ai_summary.get_issue_summary", return_value=None)
+    @patch("sentry.seer.endpoints.group_ai_summary.generate_issue_summary")
+    def test_endpoint_generates_on_cache_miss(
+        self, mock_generate_issue_summary: MagicMock, mock_get_issue_summary: MagicMock
+    ) -> None:
+        mock_generate_issue_summary.return_value = IssueSummary(
+            group_id=str(self.group.id), event_id="test_event_id", headline="Generated headline"
+        )
+
+        response = self.client.post(self.url, format="json")
+
+        assert response.status_code == 200
+        assert response.data["headline"] == "Generated headline"
+        mock_get_issue_summary.assert_called_once_with(self.group)
+        mock_generate_issue_summary.assert_called_once_with(
             group=self.group,
             user=ANY,
             force_event_id=None,
             source=SeerAutomationSource.ISSUE_DETAILS,
         )
 
-    @patch("sentry.seer.endpoints.group_ai_summary.get_issue_summary")
+    @patch("sentry.seer.endpoints.group_ai_summary.get_issue_summary", return_value=None)
+    @patch("sentry.seer.endpoints.group_ai_summary.generate_issue_summary")
     def test_endpoint_returns_bad_request_for_unavailable_summary(
-        self, mock_get_issue_summary: MagicMock
+        self, mock_generate_issue_summary: MagicMock, mock_get_issue_summary: MagicMock
     ) -> None:
-        mock_get_issue_summary.side_effect = IssueSummaryEventNotFound("internal context")
+        mock_generate_issue_summary.side_effect = IssueSummaryEventNotFound("internal context")
 
         response = self.client.post(self.url, format="json")
 
         assert response.status_code == 400
         assert response.data == {"detail": "Could not find an event for the issue"}
-        mock_get_issue_summary.assert_called_once_with(
+        mock_generate_issue_summary.assert_called_once_with(
             group=self.group,
             user=ANY,
             force_event_id=None,
@@ -108,11 +133,12 @@ class GroupAiSummaryEndpointTest(APITestCase, SnubaTestCase):
         assert response.status_code == 403
         assert response.data == {"detail": "AI features are disabled for this organization."}
 
-    @patch("sentry.seer.endpoints.group_ai_summary.get_issue_summary")
+    @patch("sentry.seer.endpoints.group_ai_summary.get_issue_summary", return_value=None)
+    @patch("sentry.seer.endpoints.group_ai_summary.generate_issue_summary")
     def test_endpoint_returns_unavailable_for_lock_timeout(
-        self, mock_get_issue_summary: MagicMock
+        self, mock_generate_issue_summary: MagicMock, mock_get_issue_summary: MagicMock
     ) -> None:
-        mock_get_issue_summary.side_effect = UnableToAcquireLock
+        mock_generate_issue_summary.side_effect = UnableToAcquireLock
 
         response = self.client.post(self.url, format="json")
 

@@ -103,6 +103,42 @@ jobs:
           MERGE_BASE: ${{ steps.strategy.outputs.merge_base }}
           DEBUG: 'run-on-changed:*'
 
+  lint-incubator:
+    name: lint incubator
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-node-pnpm
+
+      - name: Test lint incubator
+        run: pnpm run lint:incubator:test
+
+      - name: Check introduced findings
+        if: github.event_name == 'pull_request'
+        run: |
+          BASE_COMMIT=$(git rev-parse --verify 'HEAD^1^{commit}')
+          node scripts/lint-incubator.ts check --base "$BASE_COMMIT" --json > lint-incubator.json
+
+      - name: Record master inventory
+        if: github.event_name == 'push'
+        run: node scripts/lint-incubator.ts snapshot > lint-incubator.json
+
+      - name: Upload lint incubator inventory
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # 4.6.2
+        with:
+          name: lint-incubator-${{ github.sha }}
+          path: lint-incubator.json
+          if-no-files-found: ignore
+          retention-days: 30
+
   knip:
     if: needs.files-changed.outputs.frontend_all == 'true'
     needs: files-changed
@@ -289,6 +325,7 @@ jobs:
         jest-tests,
         typescript,
         oxlint,
+        lint-incubator,
         knip,
         form-field-registry,
         embed-widgets,
@@ -301,6 +338,6 @@ jobs:
       # If any jobs we depend on fail, we will fail since this is a required check
       # NOTE: A timeout is considered a failure
       - name: Check for failures
-        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || needs.lint-incubator.result != 'success'
         run: |
           echo "One of the dependent jobs have failed. You may need to re-run it." && exit 1

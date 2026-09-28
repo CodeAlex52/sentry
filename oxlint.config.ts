@@ -380,7 +380,12 @@ const config = defineConfig({
       },
       {
         category: 'configs',
-        pattern: ['package.json', 'config/**/*.*', '*.config.{mjs,js,ts}'],
+        pattern: [
+          'package.json',
+          'config/**/*.*',
+          '*.config.{mjs,js,ts}',
+          'oxlint.config.incubator.ts',
+        ],
       },
     ],
     // All descriptors and selectors use the v7 entity/query model.
@@ -742,6 +747,7 @@ const config = defineConfig({
           'analyze-styled\\.ts$',
           'type-coverage\\.ts$',
           'type-coverage-diff\\.ts$',
+          '^lint-incubator(?:\\.test)?\\.ts$',
           'AiSetupDataConsent\\.tsx$',
           'CredentialRow\\.tsx$',
           'DevKitSettings\\.tsx$',

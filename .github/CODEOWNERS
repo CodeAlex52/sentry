@@ -171,6 +171,8 @@ vercel.json                                              @getsentry/owners-js-bu
 /.github/file-filters.yml                                @getsentry/owners-js-build
 build-utils/                                             @getsentry/owners-js-build
 oxlint.config.ts                                         @getsentry/owners-js-build
+oxlint.config.incubator.ts                               @getsentry/owners-js-build
+/scripts/lint-incubator*                                 @getsentry/owners-js-build
 jest-balance.json                                        @getsentry/owners-js-build
 jest.config.ts                                           @getsentry/owners-js-build
 /tests/js/test-balancer/                                 @getsentry/owners-js-build

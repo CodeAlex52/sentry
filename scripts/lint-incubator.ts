@@ -4,6 +4,7 @@ import {createHash} from 'node:crypto';
 import {
   appendFileSync,
   mkdtempSync,
+  realpathSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -311,7 +312,7 @@ async function main() {
     !values.rule || rules.includes(values.rule),
     `Rule is not enrolled: ${values.rule}`
   );
-  const scratch = mkdtempSync(path.join(tmpdir(), 'lint-incubator-'));
+  const scratch = realpathSync(mkdtempSync(path.join(tmpdir(), 'lint-incubator-')));
   try {
     const require = createRequire(path.join(root, 'package.json'));
     const configPath = path.join(root, 'oxlint.config.incubator.ts');

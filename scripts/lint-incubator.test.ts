@@ -39,7 +39,7 @@ test('incubator compares real oxlint occurrences against exact Git source', () =
   const profile = (rules: Record<string, string> = {'eslint/no-void': 'error'}) =>
     write(
       'oxlint.config.incubator.ts',
-      `export default ${JSON.stringify({categories, rules, ignorePatterns: ['static/ignored/*', '!static/ignored/keep.ts', 'node_modules/**']})};\n`
+      `export default ${JSON.stringify({categories, rules, ignorePatterns: ['static/ignored/*', '!static/ignored/keep.ts', 'node_modules/**'], overrides: [{files: ['static/internal/**'], rules: {'eslint/no-void': 'off'}}]})};\n`
     );
   const commit = () => {
     git('add', '.');
@@ -50,7 +50,7 @@ test('incubator compares real oxlint occurrences against exact Git source', () =
     const result = spawnSync(process.execPath, [cli, ...args], {
       cwd: root,
       encoding: 'utf8',
-      env: {...process.env, GITHUB_ACTIONS: 'false'},
+      env: {...process.env, GITHUB_ACTIONS: 'false', TMPDIR: path.join(root, 'scratch')},
     });
     assert.equal(
       result.status,
@@ -72,11 +72,13 @@ test('incubator compares real oxlint occurrences against exact Git source', () =
       path.join(root, 'node_modules'),
       'dir'
     );
-    write('.gitignore', 'node_modules/\n');
+    symlinkSync(tmpdir(), path.join(root, 'scratch'), 'dir');
+    write('.gitignore', 'node_modules/\n/scratch\n');
     write('package.json', '{"type":"module"}\n');
     profile({});
     write('static/a.ts', 'void first();\nvoid second();\n');
     write('static/ignored/a.ts', 'void ignored();\n');
+    write('static/internal/a.ts', 'void first();\n');
     write('static/ignored/keep.ts', 'export const kept = true;\n');
     commit();
     assert.deepEqual(check().occurrences, []);

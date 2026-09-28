@@ -86,7 +86,7 @@ pnpm run lint:js components/avatar.tsx    # specific file(s)
 pnpm run fix                              # auto-fix
 ```
 
-Incubator rules use a separate gate. Run `pnpm lint:incubator` against fetched `origin/master`; use `--base HEAD` only for uncommitted changes. Inspect debt with `pnpm lint:incubator:backlog`. Never change the registry to make a regression pass. See [incubator operations](static/oxlint/incubator.md) for enrollment and graduation.
+Incubator rules run through prek for frontend and lint configuration changes. Fix every introduced finding before committing; never change the registry to make a regression pass. The hook compares against local `origin/master`, so fetch it before checking to include recent cleanup. Run `pnpm lint:incubator` directly for the same gate; use `--base HEAD` only for uncommitted changes. Inspect existing debt with `pnpm lint:incubator:backlog`. See [incubator operations](static/oxlint/incubator.md) for enrollment and graduation.
 
 #### Testing
 

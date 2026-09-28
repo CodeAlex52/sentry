@@ -97,6 +97,14 @@ repos:
         files: \.(ts|js|tsx|jsx|mjs)$
         entry: env SENTRY_PRECOMMIT=true ./node_modules/.bin/oxlint --quiet --fix --no-error-on-unmatched-pattern
 
+      - id: lint-incubator
+        name: lint incubator
+        language: system
+        files: ^(static/|scripts/lint-incubator(?:\.test)?\.ts$|oxlint\.config(?:\.incubator)?\.ts$|package\.json$|pnpm-lock\.yaml$|\.pre-commit-config\.yaml$)
+        entry: node scripts/lint-incubator.ts check
+        pass_filenames: false
+        require_serial: true
+
       - id: stylelint
         name: stylelint
         language: system

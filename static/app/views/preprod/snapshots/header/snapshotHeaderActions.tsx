@@ -44,6 +44,7 @@ import {
 } from 'sentry/views/preprod/types/buildDetailsTypes';
 import type {SnapshotDetailsApiResponse} from 'sentry/views/preprod/types/snapshotTypes';
 import {getSnapshotPath} from 'sentry/views/preprod/utils/buildLinkUtils';
+import {makeSnapshotsListUrl} from 'sentry/views/preprod/utils/releasesUrl';
 import {handleStaffPermissionError} from 'sentry/views/preprod/utils/staffPermissionError';
 
 interface SnapshotHeaderActionsProps {
@@ -216,8 +217,7 @@ export function SnapshotHeaderActions({
       method: 'DELETE',
       success: () => {
         addSuccessMessage(t('Snapshot deleted'));
-        // TODO(preprod): Redirect to snapshot builds list once that UI is added
-        navigate('/');
+        navigate(makeSnapshotsListUrl(organizationSlug, {project: data.project_id}));
       },
       error: (resp: any) => {
         setIsDeleting(false);
@@ -228,7 +228,7 @@ export function SnapshotHeaderActions({
         }
       },
     });
-  }, [apiUrl, navigate]);
+  }, [apiUrl, navigate, organizationSlug, data.project_id]);
 
   const handleDownloadImages = useCallback(() => {
     const archiveUrl = `/organizations/${organizationSlug}/preprodartifacts/snapshots/${data.head_artifact_id}/archive/`;

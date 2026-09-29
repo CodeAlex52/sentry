@@ -86,7 +86,7 @@ pnpm run lint:js components/avatar.tsx    # specific file(s)
 pnpm run fix                              # auto-fix
 ```
 
-Incubator rules run through prek for frontend and lint configuration changes. Fix every introduced finding before committing; never change the registry to make a regression pass. Local checks compare against the merge base of `HEAD` and locally fetched `origin/master`, without network access. Prek checks changed files; `pnpm lint:incubator` performs the full scan. Use `--base HEAD` only for uncommitted changes. CI checks the exact target base after merging, including cleanup since the branch diverged. Inspect existing debt with `pnpm lint:incubator:backlog`. See [incubator operations](static/oxlint/incubator.md) for enrollment and graduation.
+The lint incubator is opt-in tooling. It does not run in prek, normal lint, or CI. Use `pnpm lint:incubator` to compare against the merge base of `HEAD` and locally fetched `origin/master`, or `--base HEAD` for uncommitted changes. Inspect existing findings with `pnpm lint:incubator:backlog`. See [incubator operations](static/oxlint/incubator.md) when evaluating or enrolling a rule.
 
 #### Testing
 

@@ -22,6 +22,7 @@
     "lint:js": "oxlint",
     "lint:incubator": "node scripts/lint-incubator.ts check",
     "lint:incubator:backlog": "node scripts/lint-incubator.ts backlog",
+    "lint:incubator:snapshot": "node scripts/lint-incubator.ts snapshot",
     "lint:incubator:test": "node --test scripts/lint-incubator.test.ts",
     "lint:js:changed": "run-on-changed",
     "lint:css": "stylelint '**/*.[jt]sx'",

@@ -1,6 +1,6 @@
 # Lint incubator
 
-The incubator prevents new violations of selected rules while existing violations are cleaned up. The registry in `oxlint.config.incubator.ts` ships empty. Normal lint remains unchanged.
+The incubator is opt-in tooling for comparing new violations of selected rules against existing findings. It does not run in prek, normal lint, or CI. The registry in `oxlint.config.incubator.ts` ships empty. Normal lint remains unchanged.
 
 ## Commands
 
@@ -10,13 +10,13 @@ pnpm lint:incubator
 pnpm lint:incubator --base HEAD
 pnpm lint:incubator --base origin/master --json
 pnpm lint:incubator:backlog --rule eslint/no-void --file static/app/example.ts
-node scripts/lint-incubator.ts snapshot
+pnpm lint:incubator:snapshot
 pnpm lint:incubator:test
 ```
 
 `check` scans the current working tree and the resolved base commit with the current incubator rules and installed toolchain. Locally, its default base is the unique merge base of `HEAD` and locally fetched `origin/master`. This checks branch changes without blaming an older checkout for changes made only on master. It requires no network or GitHub API access. Explicit `--base` uses that exact commit; `--base HEAD` checks only uncommitted changes. An unavailable or ambiguous base fails, including with an empty registry. Exit codes are 0 for no introduced findings, 1 for introduced findings, and 2 for invalid arguments, unavailable source, or scan errors.
 
-The `lint-incubator` prek hook runs `check --changed` for changes under `static/`, the incubator script, lint configuration, dependencies, or the hook configuration. It scans changed files on both sides, including deleted sources and new untracked files, preserving move allowances while rejecting copies. Identical files would consume their own allowances, so omitting them preserves the comparison. Configuration, dependency, or ignore-file changes require full scans. New findings fail locally with file locations and rule messages. Like other pre-commit hooks, a commit checks staged content while unstaged changes are temporarily stashed. To run it explicitly, use `.venv/bin/prek run lint-incubator --all-files`. CI checks the merged source against its exact target base, so it also catches restored debt removed on master since the local branch diverged.
+Use `pnpm lint:incubator --changed` to scan changed files on both sides, including deleted sources and new untracked files. This preserves move allowances while rejecting copies. Identical files would consume their own allowances, so omitting them preserves the comparison. Configuration, dependency, or ignore-file changes require full scans. This command checks the working tree, including staged and unstaged changes; it is not a commit hook.
 
 `backlog` emits live JSON and supports exact rule and repository-relative file filters. `snapshot` emits the complete current inventory. `check --json` includes that inventory, the resolved base, and introduced findings. Findings include the rule, location, message, help, URL, and source fingerprint. The revision identifies HEAD; local commands include uncommitted working-tree changes.
 
@@ -26,7 +26,7 @@ Scans cover `static/` and reuse the main lint ignore patterns. Initial enrollmen
 
 Local checks reuse full base inventories in `.artifacts/lint-incubator/baselines/`. A miss scans the base once; later checks scan only the current source. The cache key includes the exact base, resolved lint policy, plugin source, incubator implementation, and requested and installed toolchain identities. Changing any of these rebuilds the baseline. For changed-file checks, only matching paths from the cached inventory supply allowances.
 
-Cache files are optional: missing, invalid, unreadable, or unwritable entries fall back to scanning. Writes are atomic. Deleting the cache is safe. The cache assumes package-manager-installed dependencies are immutable and enrolled rules are deterministic and file-local. Plugins outside the hashed repository plugin tree, symlinked plugin trees, or installations without dependency metadata bypass caching. CI bypasses the local cache and verifies source directly; master artifacts remain audit records. No cache operation accesses the network.
+Cache files are optional: missing, invalid, unreadable, or unwritable entries fall back to scanning. Writes are atomic. Deleting the cache is safe. The cache assumes package-manager-installed dependencies are immutable and enrolled rules are deterministic and file-local. Plugins outside the hashed repository plugin tree, symlinked plugin trees, or installations without dependency metadata bypass caching. Setting `GITHUB_ACTIONS=true` bypasses the local cache and verifies source directly. No cache operation accesses the network.
 
 ## Source identity
 
@@ -44,12 +44,10 @@ Blank lines outside a statement preserve its identity. Formatting, comments, or 
 4. Fix debt in ordinary PRs. Each merge immediately removes those source allowances from subsequent checks.
 5. When the backlog is empty, enable the rule in normal lint and remove it from the incubator in the same change. Run normal lint and the incubator tests.
 
-Keep infrastructure and registry changes under the existing JS build owners' review. A failing gate is not a reason to disable a rule, add ignores, or weaken identity matching.
+Keep infrastructure and registry changes under the existing JS build owners' review. When evaluating findings, fix new violations rather than weakening the registry or identity matching.
 
-## CI and master records
+## Future automatic enforcement
 
-The unconditional `lint-incubator` job is part of the required Frontend check. On PRs, GitHub checks out the synthetic merge commit. Like `type-coverage-diff.yml`, the incubator uses `HEAD^1`, the exact base branch tip used for that merge. It does not use the historical merge base, the PR's previous commit, or a fetched tip that might have advanced. Failure to resolve that parent fails the job.
+Automatic hooks, CI checks, and master snapshot jobs are deferred until the local check fits the per-commit performance budget. The package scripts are available for explicit experiments; this change adds no required checks or background jobs.
 
-Each master push records a complete JSON inventory under `lint-incubator-<commit SHA>` with 30-day artifact retention. PR checks upload their inventory and introduced findings even when findings fail the gate. Records are audit artifacts, never enforcement inputs. No nightly shrink job, committed baseline, bot PR, or writable GitHub token is needed.
-
-Unrelated changes to master do not require a new baseline check. A PR needs revalidation when master removes an allowance it relies on or changes the lint policy. This workflow does not invalidate an existing green check in those cases, so stale PRs can restore removed debt under the current merge policy. Selective revalidation remains a rollout requirement; strict up-to-date checks or a merge queue are broader alternatives. The required Frontend aggregate rejects a failed, cancelled, or skipped incubator job.
+A future PR check should compare the synthetic merge checkout against its exact first parent, `HEAD^1`, as in `type-coverage-diff.yml`. It must also handle checks becoming stale when master removes an allowance or changes lint policy, without requiring every PR to be up to date. The CLI supports an explicit `--base` for that comparison.

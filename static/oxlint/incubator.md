@@ -9,7 +9,7 @@ git fetch origin master
 pnpm lint:incubator
 pnpm lint:incubator --base HEAD
 pnpm lint:incubator --base origin/master --json
-pnpm lint:incubator:backlog --rule eslint/no-void --file static/app/example.ts
+pnpm lint:incubator:backlog
 pnpm lint:incubator:snapshot
 pnpm lint:incubator:test
 ```
@@ -41,7 +41,7 @@ Blank lines outside a statement preserve its identity. Formatting, comments, or 
 1. Add a canonical rule key such as `eslint/no-void` with severity `error` to the empty `rules` registry. Rule options use `['error', options]`. Register any additional plugin explicitly. Do not inherit the normal lint rules or overrides.
 2. Run the integration test and inspect a full live backlog. Check the rule's diagnostics against realistic source, including file moves and Unicode. Custom plugins must resolve with the current installed dependencies; enrollment should test any plugin-specific project settings on the exported base as well.
 3. Review the configuration change separately from cleanup when practical. Existing findings are grandfathered by scanning the exact base with the newly enrolled rule.
-4. Fix debt in ordinary PRs. Each merge immediately removes those source allowances from subsequent checks.
+4. Fix debt in ordinary PRs. Checks stop allowing cleaned-up findings when the selected base includes that cleanup. Existing branches keep their historical merge base until they incorporate newer master changes.
 5. When the backlog is empty, enable the rule in normal lint and remove it from the incubator in the same change. Run normal lint and the incubator tests.
 
 Keep infrastructure and registry changes under the existing JS build owners' review. When evaluating findings, fix new violations rather than weakening the registry or identity matching.

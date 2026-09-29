@@ -13,9 +13,6 @@ type CssNode = {
 );
 type CssDocument = {nodes: Array<{nodes: CssNode[]}>};
 
-const styledSyntax: {parse: (source: string, options: {from: string}) => CssDocument} =
-  createRequire(import.meta.url)('postcss-styled-syntax');
-
 const CONTAINER_PROPERTIES = new Set([
   'padding',
   'padding-top',
@@ -153,6 +150,9 @@ export const preferPrimitives = defineRule({
     },
   },
   create(context) {
+    const styledSyntax: {
+      parse: (source: string, options: {from: string}) => CssDocument;
+    } = createRequire(import.meta.url)('postcss-styled-syntax');
     const styles = new Map<
       ESTree.Node,
       {declarations: Declarations; elements: Set<string>}

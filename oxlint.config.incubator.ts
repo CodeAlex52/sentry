@@ -14,6 +14,15 @@ export default defineConfig({
     nursery: 'off',
   },
   plugins: ['typescript', 'react', 'unicorn'],
+  jsPlugins: [
+    {name: '@sentry/scraps', specifier: './static/oxlint/eslintPluginScraps/index.ts'},
+  ],
   ignorePatterns: oxlintIgnorePatterns,
-  rules: {},
+  rules: {'@sentry/scraps/prefer-primitives': 'error'},
+  overrides: [
+    {
+      files: ['static/app/components/core/**'],
+      rules: {'@sentry/scraps/prefer-primitives': 'off'},
+    },
+  ],
 });

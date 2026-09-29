@@ -372,3 +372,102 @@ test('incubator compares real oxlint occurrences against exact Git source', () =
     rmSync(root, {recursive: true, force: true});
   }
 });
+
+test('prefer-primitives is an incubator tenant with exact-base cleanup and exclusions', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'prefer-primitives-test-'));
+  const git = (...args: string[]) =>
+    execFileSync('git', ['-C', root, ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+  const write = (file: string, contents: string) => {
+    mkdirSync(path.dirname(path.join(root, file)), {recursive: true});
+    writeFileSync(path.join(root, file), contents);
+  };
+  const commit = () => {
+    git('add', '.');
+    git('commit', '-qm', 'Synthetic primitive fixture');
+  };
+  const check = (status = 0) => {
+    const result = spawnSync(
+      process.execPath,
+      [cli, 'check', '--base', 'HEAD', '--json'],
+      {
+        cwd: root,
+        encoding: 'utf8',
+        env: {...process.env, GITHUB_ACTIONS: 'false'},
+      }
+    );
+    assert.equal(result.status, status, `${result.stdout}\n${result.stderr}`);
+    return JSON.parse(result.stdout);
+  };
+  try {
+    git('init', '-q', '-b', 'master');
+    git('config', 'commit.gpgsign', 'false');
+    git('config', 'core.hooksPath', '/dev/null');
+    git('config', 'user.name', 'Incubator Test');
+    git('config', 'user.email', 'test@example.com');
+    symlinkSync(
+      path.join(project, 'node_modules'),
+      path.join(root, 'node_modules'),
+      'dir'
+    );
+    mkdirSync(path.join(root, 'static/oxlint'), {recursive: true});
+    symlinkSync(
+      path.join(project, 'static/oxlint/eslintPluginScraps'),
+      path.join(root, 'static/oxlint/eslintPluginScraps'),
+      'dir'
+    );
+    write('.gitignore', 'node_modules/\n');
+    write('package.json', '{"type":"module"}\n');
+    const rule = '@sentry/scraps/prefer-primitives';
+    write(
+      'oxlint.config.incubator.ts',
+      `export default ${JSON.stringify({
+        categories,
+        jsPlugins: [
+          {
+            name: '@sentry/scraps',
+            specifier: './static/oxlint/eslintPluginScraps/index.ts',
+          },
+        ],
+        ignorePatterns: ['static/oxlint/**'],
+        rules: {[rule]: 'error'},
+        overrides: [{files: ['static/app/components/core/**'], rules: {[rule]: 'off'}}],
+      })};\n`
+    );
+    const oldSource = 'const View = <div style={{display:"flex",gap:8}}/>;\n';
+    const internalSource = 'const Internal = <div style={{display:"grid"}}/>;\n';
+    write('static/old.tsx', oldSource);
+    write('static/app/components/core/internal.tsx', internalSource);
+    commit();
+    const unchanged = check();
+    assert.equal(unchanged.occurrences.length, 1);
+    assert.equal(unchanged.occurrences[0].rule, rule);
+    assert.deepEqual(unchanged.introduced, []);
+    write('static/copied-internal.tsx', internalSource);
+    assert.equal(
+      check(1).introduced.length,
+      1,
+      'excluded primitive source cannot pay for a new external occurrence'
+    );
+    rmSync(path.join(root, 'static/copied-internal.tsx'));
+    write('static/copy.tsx', oldSource);
+    assert.equal(
+      check(1).introduced.length,
+      1,
+      'copying a style definition creates new debt'
+    );
+    rmSync(path.join(root, 'static/copy.tsx'));
+    write(
+      'static/old.tsx',
+      "import {Flex} from '@sentry/scraps/layout'; const View = <Flex gap='md'/>;\n"
+    );
+    assert.deepEqual(check().occurrences, []);
+    commit();
+    write('static/old.tsx', oldSource);
+    assert.equal(check(1).introduced.length, 1, 'cleaned primitive debt cannot return');
+  } finally {
+    rmSync(root, {recursive: true, force: true});
+  }
+});

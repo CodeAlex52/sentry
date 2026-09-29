@@ -1,6 +1,6 @@
 # Lint incubator
 
-The incubator is opt-in tooling for comparing new violations of selected rules against existing findings. It does not run in prek, normal lint, or CI. The registry in `oxlint.config.incubator.ts` ships empty. Normal lint remains unchanged.
+The incubator is opt-in tooling for comparing new violations of selected rules against existing findings. It does not run in prek, normal lint, or CI. The registry in `oxlint.config.incubator.ts` enrolls `@sentry/scraps/prefer-primitives`. Normal lint remains unchanged.
 
 ## Commands
 
@@ -38,7 +38,7 @@ Blank lines outside a statement preserve its identity. Formatting, comments, or 
 
 ## Enrollment and graduation
 
-1. Add a canonical rule key such as `eslint/no-void` with severity `error` to the empty `rules` registry. Rule options use `['error', options]`. Register any additional plugin explicitly. Do not inherit the normal lint rules or overrides.
+1. Add a canonical rule key such as `eslint/no-void` with severity `error` to the `rules` registry. Rule options use `['error', options]`. Register any additional plugin explicitly. Do not inherit the normal lint rules or overrides.
 2. Run the integration test and inspect a full live backlog. Check the rule's diagnostics against realistic source, including file moves and Unicode. Custom plugins must resolve with the current installed dependencies; enrollment should test any plugin-specific project settings on the exported base as well.
 3. Review the configuration change separately from cleanup when practical. Existing findings are grandfathered by scanning the exact base with the newly enrolled rule.
 4. Fix debt in ordinary PRs. Checks stop allowing cleaned-up findings when the selected base includes that cleanup. Existing branches keep their historical merge base until they incorporate newer master changes.
@@ -51,3 +51,25 @@ Keep infrastructure and registry changes under the existing JS build owners' rev
 Automatic hooks, CI checks, and master snapshot jobs are deferred until the local check fits the per-commit performance budget. The package scripts are available for explicit experiments; this change adds no required checks or background jobs.
 
 A future PR check should compare the synthetic merge checkout against its exact first parent, `HEAD^1`, as in `type-coverage-diff.yml`. It must also handle checks becoming stale when master removes an allowance or changes lint policy, without requiring every PR to be up to date. The CLI supports an explicit `--base` for that comparison.
+
+## First tenant: prefer-primitives
+
+`@sentry/scraps/prefer-primitives` runs only when the incubator is invoked explicitly. It is disabled in normal lint, prek, and CI. The rule-specific override excludes `static/app/components/core/**`, where the primitives themselves implement these styles. Other incubator rules keep their own scope.
+
+The rule reports one finding per style definition, including a shared `const` used more than once. It recognizes intrinsic Emotion `styled` templates/calls and intrinsic JSX `css`/`style` values. Emotion imports and variable references resolve through lexical bindings, including aliases and forward declarations. Unrelated object data and styles used only on custom components are not candidates.
+
+| Evidence                                                                      | Suggested component                                   |
+| ----------------------------------------------------------------------------- | ----------------------------------------------------- |
+| Native `button`                                                               | `Button` from `@sentry/scraps/button`                 |
+| Native `h1`–`h6`                                                              | `Heading` from `@sentry/scraps/text`, preserving `as` |
+| Explicit flex/inline-flex and column direction                                | `Stack` from `@sentry/scraps/layout`                  |
+| Explicit flex/inline-flex                                                     | `Flex` from `@sentry/scraps/layout`                   |
+| Explicit grid/inline-grid                                                     | `Grid` from `@sentry/scraps/layout`                   |
+| Two supported typography declarations on span, p, label, div, time, or legend | `Text` from `@sentry/scraps/text`                     |
+| Two physical padding, border-radius, or background-color declarations         | `Container` from `@sentry/scraps/layout`              |
+
+Layout suggestions are limited to the tags supported by `ContainerElement`, so they do not suggest replacing links, inputs, or SVG elements. Container replaces the upstream rule's obsolete Box suggestion. Margins, logical padding/radii, and unsupported typography such as letter spacing or hyphens do not establish a candidate. Typography evidence includes size, line height, color, current regular/medium font weights, monospace, and supported alignment, italic, uppercase, decoration, and wrapping values. Layout selection takes precedence over Text and Container; raw button and heading semantics take precedence over layout styles.
+
+There is no autofix. Choose tokens, preserve intrinsic semantics and unsupported styles, and review form behavior manually. `Button` defaults to `type="button"`; a native button may submit its form. `Heading` requires the original heading level through `as`.
+
+CSS templates use the installed styled-syntax parser without concatenating interpolation fragments. Nested rules, comments, and quoted CSS-like strings do not count as root declarations. Dynamic display values, arbitrary interpolated style fragments, object spreads/computed keys, multi-argument composition, imported style objects, mutable bindings, escaping or property-accessed style objects, CSS `all` resets or `!important`, JSX prop spreads or mixed css/style attributes, and block-bodied callbacks are conservatively skipped. Syntax-only matching does not prove that every value or behavior can be represented by primitive props.

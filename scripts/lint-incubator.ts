@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict';
 import {execFileSync, spawnSync} from 'node:child_process';
-import {createHash} from 'node:crypto';
+import {createHash, randomUUID} from 'node:crypto';
 import {
   appendFileSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
   mkdtempSync,
+  readdirSync,
   realpathSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -39,27 +44,31 @@ const diagnosticSchema = z.object({
     .min(1),
 });
 
-type Occurrence = {
-  column: number;
-  file: string;
-  fingerprint: string;
-  help: string | null;
-  line: number;
-  message: string;
-  rule: string;
-  url: string | null;
-};
-
-type Inventory = {
-  occurrences: Occurrence[];
-  revision: string;
-  rules: string[];
-  schemaVersion: 1;
-};
+const occurrenceSchema = z.object({
+  column: z.number().int().positive(),
+  file: z
+    .string()
+    .refine(file => file.startsWith('static/') && !file.split('/').includes('..')),
+  fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  help: z.string().nullable(),
+  line: z.number().int().positive(),
+  message: z.string(),
+  rule: z.string(),
+  url: z.string().nullable(),
+});
+const inventorySchema = z.object({
+  occurrences: z.array(occurrenceSchema),
+  revision: z.string(),
+  rules: z.array(z.string()),
+  schemaVersion: z.literal(1),
+});
+type Occurrence = z.infer<typeof occurrenceSchema>;
+type Inventory = z.infer<typeof inventorySchema>;
 
 function git(root: string, args: string[]) {
   return execFileSync('git', ['-C', root, ...args], {
     encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
     stdio: ['ignore', 'pipe', 'pipe'],
   }).trim();
 }
@@ -74,6 +83,166 @@ function resolveRevision(root: string, ref: string) {
   }
 }
 
+function defaultBase(root: string, revision: string) {
+  const master = resolveRevision(root, 'origin/master');
+  const bases = git(root, ['merge-base', '--all', revision, master]).split('\n');
+  assert(
+    bases.length === 1 && bases[0],
+    'Cannot determine a unique merge base with origin/master. Pass --base explicitly.'
+  );
+  return bases[0];
+}
+
+function changedFiles(root: string, base: string): string[] | undefined {
+  const files = [
+    ...new Set(
+      [
+        git(root, ['diff', '--name-only', '--no-renames', '-z', base, '--']),
+        git(root, ['ls-files', '--others', '--exclude-standard', '-z']),
+      ]
+        .flatMap(output => output.split('\0'))
+        .filter(Boolean)
+    ),
+  ];
+  if (
+    files.some(
+      file =>
+        /(^|\/)(?:\.gitignore|\.eslintignore|\.oxlintignore|package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|tsconfig(?:\.[^/]*)?\.json)$/.test(
+          file
+        ) ||
+        /^(?:oxlint\.|static\/oxlint\/|scripts\/lint-incubator(?:\.test)?\.ts$|\.node-version$)/.test(
+          file
+        )
+    )
+  ) {
+    return undefined;
+  }
+  const sources = files.filter(file => file.startsWith('static/'));
+  // A full scan also avoids exceeding the operating system's argument limit.
+  return Buffer.byteLength(sources.join('\0')) > 32_000 ? undefined : sources;
+}
+
+function baselineCachePath(
+  root: string,
+  base: string,
+  config: unknown,
+  plugins: string[]
+): string | undefined {
+  if (process.env.GITHUB_ACTIONS === 'true') {
+    return undefined;
+  }
+  try {
+    const canonicalRoot = realpathSync(root);
+    const tree = path.join(canonicalRoot, 'static', 'oxlint');
+    if (plugins.some(plugin => !realpathSync(plugin).startsWith(`${tree}${path.sep}`))) {
+      return undefined;
+    }
+    const require = createRequire(path.join(root, 'package.json'));
+    const oxlintVersion = require('oxlint/package.json').version;
+    assert(typeof oxlintVersion === 'string', 'Missing oxlint version');
+    const hash = createHash('sha256');
+    hash.update(
+      JSON.stringify([
+        base,
+        config,
+        oxlintVersion,
+        ts.version,
+        process.version,
+        process.platform,
+        process.arch,
+      ])
+    );
+    hash.update(readFileSync(new URL(import.meta.url)));
+    hash.update(readFileSync(path.join(root, 'node_modules/.pnpm/lock.yaml')));
+    const files = [
+      '.eslintignore',
+      '.gitignore',
+      '.node-version',
+      '.oxlintignore',
+      'oxlint.config.ts',
+      'oxlint.config.incubator.ts',
+      'package.json',
+      'pnpm-lock.yaml',
+      'pnpm-workspace.yaml',
+      'tsconfig.json',
+    ];
+    const collect = (directory: string) => {
+      assert(!lstatSync(directory).isSymbolicLink(), 'Symlinked plugin tree');
+      for (const entry of readdirSync(directory, {withFileTypes: true})) {
+        const file = path.join(directory, entry.name);
+        assert(!entry.isSymbolicLink(), 'Symlinked plugin source');
+        if (entry.isDirectory()) {
+          collect(file);
+        } else {
+          assert(entry.isFile(), 'Non-file plugin source');
+          files.push(path.relative(canonicalRoot, file));
+        }
+      }
+    };
+    if (existsSync(tree)) {
+      assert(realpathSync(tree) === tree, 'Symlinked plugin tree');
+      collect(tree);
+    }
+    for (const file of files.sort()) {
+      const absolute = path.join(root, file);
+      hash.update(
+        JSON.stringify([
+          file,
+          existsSync(absolute) ? readFileSync(absolute).toString('base64') : null,
+        ])
+      );
+    }
+    return path.join(
+      root,
+      '.artifacts/lint-incubator/baselines',
+      `${hash.digest('hex')}.json`
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+function readBaselineCache(file: string | undefined, base: string, rules: string[]) {
+  if (!file) {
+    return;
+  }
+  try {
+    const cached = inventorySchema
+      .extend({key: z.string()})
+      .parse(JSON.parse(readFileSync(file, 'utf8')));
+    assert(cached.key === path.basename(file, '.json') && cached.revision === base);
+    assert(JSON.stringify(cached.rules) === JSON.stringify(rules));
+    assert(cached.occurrences.every(occurrence => rules.includes(occurrence.rule)));
+    return cached.occurrences;
+  } catch {
+    return;
+  }
+}
+
+function writeBaselineCache(file: string | undefined, inventory: Inventory) {
+  if (!file) {
+    return;
+  }
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  try {
+    mkdirSync(path.dirname(file), {recursive: true});
+    writeFileSync(
+      temporary,
+      JSON.stringify({...inventory, key: path.basename(file, '.json')}),
+      {flag: 'wx'}
+    );
+    renameSync(temporary, file);
+  } catch {
+    // The cache is optional; a successful scan remains authoritative.
+  } finally {
+    try {
+      rmSync(temporary, {force: true});
+    } catch {
+      // An unwritable cache must not make lint fail.
+    }
+  }
+}
+
 function ruleName(code: string) {
   const match = /^([^()]+)\(([^()]+)\)$/.exec(code);
   assert(match, `Unexpected oxlint diagnostic code ${code}`);
@@ -84,9 +253,11 @@ function scan(
   root: string,
   configPath: string,
   binary: string,
-  rules: string[]
+  rules: string[],
+  files?: string[]
 ): Occurrence[] {
-  if (rules.length === 0) {
+  const paths = files?.filter(file => existsSync(path.join(root, file))) ?? ['static'];
+  if (rules.length === 0 || paths.length === 0) {
     return [];
   }
   const result = spawnSync(
@@ -98,7 +269,7 @@ function scan(
       '--format',
       'json',
       '--no-error-on-unmatched-pattern',
-      'static',
+      ...paths,
     ],
     {
       cwd: root,
@@ -255,6 +426,7 @@ async function main() {
     allowPositionals: true,
     options: {
       base: {type: 'string'},
+      changed: {type: 'boolean'},
       json: {type: 'boolean'},
       rule: {type: 'string'},
       file: {type: 'string'},
@@ -270,7 +442,7 @@ async function main() {
   );
   if (values.help) {
     console.log(
-      'Usage: lint-incubator.ts check [--base REF] [--json]\n       lint-incubator.ts backlog [--rule RULE] [--file PATH] [--json]\n       lint-incubator.ts snapshot\ncheck defaults to origin/master. Exit codes: 0 clean, 1 introduced findings, 2 invalid input or scan failure.'
+      'Usage: lint-incubator.ts check [--base REF] [--changed] [--json]\n       lint-incubator.ts backlog [--rule RULE] [--file PATH] [--json]\n       lint-incubator.ts snapshot\ncheck defaults to the merge base of HEAD and local origin/master. --base compares that exact revision. --changed checks changed files, falling back to a full scan for lint policy changes. Exit codes: 0 clean, 1 introduced findings, 2 invalid input or scan failure.'
     );
     return;
   }
@@ -283,6 +455,7 @@ async function main() {
     command === 'check' || values.base === undefined,
     '--base is only valid for check'
   );
+  assert(command === 'check' || !values.changed, '--changed is only valid for check');
   assert(
     command === 'backlog' || (values.rule === undefined && values.file === undefined),
     '--rule and --file are only valid for backlog'
@@ -295,8 +468,11 @@ async function main() {
   const revision = resolveRevision(root, 'HEAD');
   const base =
     command === 'check'
-      ? resolveRevision(root, values.base ?? 'origin/master')
+      ? values.base
+        ? resolveRevision(root, values.base)
+        : defaultBase(root, revision)
       : undefined;
+  const files = values.changed ? changedFiles(root, base!) : undefined;
   const profile = (
     await import(pathToFileURL(path.join(root, 'oxlint.config.incubator.ts')).href)
   ).default;
@@ -330,42 +506,63 @@ async function main() {
       schemaVersion: 1,
       revision,
       rules,
-      occurrences: scan(root, configPath, binary, rules),
+      occurrences: scan(root, configPath, binary, rules, files),
     };
     let introduced: Occurrence[] = [];
-    if (base && rules.length > 0) {
-      const archive = path.join(scratch, 'base.tar');
-      execFileSync('git', [
-        '-C',
+    if (base && rules.length > 0 && files?.length !== 0) {
+      const cachePath = baselineCachePath(
         root,
-        'archive',
-        '--format=tar',
-        `--output=${archive}`,
         base,
-        '--',
-        ...git(root, [
-          'ls-tree',
-          '--name-only',
+        config,
+        config.jsPlugins?.map((plugin: string | {specifier: string}) =>
+          typeof plugin === 'string' ? plugin : plugin.specifier
+        ) ?? []
+      );
+      let baseline = readBaselineCache(cachePath, base, rules);
+      if (!baseline) {
+        const archive = path.join(scratch, 'base.tar');
+        execFileSync('git', [
+          '-C',
+          root,
+          'archive',
+          '--format=tar',
+          `--output=${archive}`,
           base,
           '--',
-          'static',
-          '.gitignore',
-          '.eslintignore',
-        ])
-          .split('\n')
-          .filter(Boolean),
-      ]);
-      const baseRoot = mkdtempSync(path.join(scratch, 'base-'));
-      execFileSync('tar', ['-xf', archive, '-C', baseRoot]);
-      symlinkSync(
-        path.join(root, 'node_modules'),
-        path.join(baseRoot, 'node_modules'),
-        'dir'
-      );
-      const baseConfigPath = path.join(baseRoot, 'oxlint.config.incubator.json');
-      writeFileSync(baseConfigPath, JSON.stringify(config));
+          ...git(root, [
+            'ls-tree',
+            '--name-only',
+            base,
+            '--',
+            'static',
+            '.gitignore',
+            '.eslintignore',
+          ])
+            .split('\n')
+            .filter(Boolean),
+        ]);
+        const baseRoot = mkdtempSync(path.join(scratch, 'base-'));
+        execFileSync('tar', ['-xf', archive, '-C', baseRoot]);
+        symlinkSync(
+          path.join(root, 'node_modules'),
+          path.join(baseRoot, 'node_modules'),
+          'dir'
+        );
+        const baseConfigPath = path.join(baseRoot, 'oxlint.config.incubator.json');
+        writeFileSync(baseConfigPath, JSON.stringify(config));
+        baseline = scan(baseRoot, baseConfigPath, binary, rules);
+        writeBaselineCache(cachePath, {
+          schemaVersion: 1,
+          revision: base,
+          rules,
+          occurrences: baseline,
+        });
+      }
+      const selected = files ? new Set(files) : undefined;
       introduced = introducedOccurrences(
-        scan(baseRoot, baseConfigPath, binary, rules),
+        selected
+          ? baseline.filter(occurrence => selected.has(occurrence.file))
+          : baseline,
         inventory.occurrences
       );
     }
@@ -376,13 +573,20 @@ async function main() {
           (!values.file || item.file === values.file)
       );
     }
-    const result = base ? {...inventory, base, introduced} : inventory;
+    const result = base
+      ? {
+          ...inventory,
+          base,
+          introduced,
+          ...(values.changed ? {scope: files ? 'changed' : 'full'} : {}),
+        }
+      : inventory;
     if (command === 'snapshot' || command === 'backlog' || values.json) {
       console.log(JSON.stringify(result, null, 2));
     } else {
       console.log(
         rules.length
-          ? `${introduced.length} introduced finding(s); ${inventory.occurrences.length} total. Base ${base}.`
+          ? `${introduced.length} introduced finding(s); ${inventory.occurrences.length} ${files ? 'in changed files' : 'total'}. Base ${base}.`
           : `No incubator rules enrolled. Base ${base}.`
       );
       for (const occurrence of introduced) {
@@ -400,7 +604,7 @@ async function main() {
       if (process.env.GITHUB_STEP_SUMMARY) {
         appendFileSync(
           process.env.GITHUB_STEP_SUMMARY,
-          `### Lint incubator\n\n${rules.length ? `${rules.length} enrolled rule(s), ${inventory.occurrences.length} total finding(s), ${introduced.length} introduced.` : 'No rules enrolled. No lint scans performed.'}\n\nRevision: \`${revision}\`${base ? `\n\nBase: \`${base}\`` : ''}\n`
+          `### Lint incubator\n\n${rules.length ? `${rules.length} enrolled rule(s), ${inventory.occurrences.length} finding(s) ${files ? 'in changed files' : 'total'}, ${introduced.length} introduced.` : 'No rules enrolled. No lint scans performed.'}\n\nRevision: \`${revision}\`${base ? `\n\nBase: \`${base}\`` : ''}\n`
         );
       }
     }

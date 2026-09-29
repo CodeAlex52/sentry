@@ -3,8 +3,11 @@ import {execFileSync, spawnSync} from 'node:child_process';
 import {
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -46,11 +49,16 @@ test('incubator compares real oxlint occurrences against exact Git source', () =
     git('commit', '-qm', 'Synthetic fixture');
     return git('rev-parse', 'HEAD');
   };
-  const run = (args: string[], status = 0) => {
+  const run = (args: string[], status = 0, env: Record<string, string> = {}) => {
     const result = spawnSync(process.execPath, [cli, ...args], {
       cwd: root,
       encoding: 'utf8',
-      env: {...process.env, GITHUB_ACTIONS: 'false', TMPDIR: path.join(root, 'scratch')},
+      env: {
+        ...process.env,
+        GITHUB_ACTIONS: 'false',
+        TMPDIR: path.join(root, 'scratch'),
+        ...env,
+      },
     });
     assert.equal(
       result.status,
@@ -59,8 +67,11 @@ test('incubator compares real oxlint occurrences against exact Git source', () =
     );
     return result;
   };
-  const check = (status = 0, base = 'HEAD') =>
-    JSON.parse(run(['check', '--base', base, '--json'], status).stdout);
+  const check = (status = 0, base = 'HEAD', changed = false) =>
+    JSON.parse(
+      run(['check', '--base', base, '--json', ...(changed ? ['--changed'] : [])], status)
+        .stdout
+    );
   try {
     git('init', '-q', '-b', 'master');
     git('config', 'commit.gpgsign', 'false');
@@ -73,7 +84,7 @@ test('incubator compares real oxlint occurrences against exact Git source', () =
       'dir'
     );
     symlinkSync(tmpdir(), path.join(root, 'scratch'), 'dir');
-    write('.gitignore', 'node_modules/\n/scratch\n');
+    write('.gitignore', 'node_modules/\n/scratch\n.artifacts/\n');
     write('package.json', '{"type":"module"}\n');
     profile({});
     write('static/a.ts', 'void first();\nvoid second();\n');
@@ -86,6 +97,7 @@ test('incubator compares real oxlint occurrences against exact Git source', () =
     assert.match(run(['check'], 2).stderr, /origin\/master/);
     run(['check', '--wat'], 2);
     run(['snapshot', '--base', 'HEAD'], 2);
+    run(['snapshot', '--changed'], 2);
     run(['check', '--rule', 'eslint/no-void'], 2);
     run(['backlog', '--rule', 'unknown'], 2);
     run(['check', '--base', ''], 2);
@@ -100,6 +112,50 @@ test('incubator compares real oxlint occurrences against exact Git source', () =
       'first enrollment scans base with the current rule configuration and ignores ignored files'
     );
     assert.equal(enrolled.introduced.length, 0);
+    const cacheDirectory = path.join(root, '.artifacts/lint-incubator/baselines');
+    const cacheFiles = () =>
+      readdirSync(cacheDirectory).filter(file => file.endsWith('.json'));
+    assert.equal(cacheFiles().length, 1);
+    const cacheFile = path.join(cacheDirectory, cacheFiles()[0]!);
+    const cacheTime = statSync(cacheFile).mtimeMs;
+    check();
+    assert.equal(
+      statSync(cacheFile).mtimeMs,
+      cacheTime,
+      'warm checks reuse the full baseline'
+    );
+    writeFileSync(cacheFile, '{"broken":true}');
+    check();
+    const cached = JSON.parse(readFileSync(cacheFile, 'utf8'));
+    assert.equal(
+      cached.occurrences.length,
+      2,
+      'corrupt caches are replaced by a real scan'
+    );
+    profile({'eslint/no-void': 'error', 'eslint/no-console': 'error'});
+    check();
+    assert.equal(cacheFiles().length, 2, 'configuration changes invalidate the cache');
+    profile();
+    const poisoned = JSON.stringify({...cached, occurrences: []});
+    writeFileSync(cacheFile, poisoned);
+    run(['check', '--base', 'HEAD'], 0, {GITHUB_ACTIONS: 'true'});
+    assert.equal(
+      readFileSync(cacheFile, 'utf8'),
+      poisoned,
+      'CI neither reads nor writes local caches'
+    );
+    writeFileSync(cacheFile, JSON.stringify(cached));
+    const backup = `${cacheDirectory}-backup`;
+    renameSync(cacheDirectory, backup);
+    writeFileSync(cacheDirectory, 'not a directory');
+    check();
+    rmSync(cacheDirectory);
+    renameSync(backup, cacheDirectory);
+    assert.equal(
+      check(0, 'HEAD', true).scope,
+      'full',
+      'rule configuration changes require full scans'
+    );
     assert.equal(JSON.parse(run(['snapshot']).stdout).occurrences.length, 2);
     const backlog = JSON.parse(
       run(['backlog', '--rule', 'eslint/no-void', '--file', 'static/a.ts']).stdout
@@ -120,6 +176,20 @@ test('incubator compares real oxlint occurrences against exact Git source', () =
     assert.equal(check(1).introduced.length, 1, 'negated ignores apply on both scans');
     write('static/ignored/keep.ts', 'export const kept = true;\n');
     commit();
+    const unchanged = check(0, 'HEAD', true);
+    assert.equal(unchanged.scope, 'changed');
+    assert.deepEqual(unchanged.occurrences, [], 'empty scope does not scan the tree');
+
+    write('static/.gitignore', 'ignored/keep.ts\n');
+    assert.equal(
+      check(0, 'HEAD', true).scope,
+      'full',
+      'untracked nested ignore files require full scans'
+    );
+    rmSync(path.join(root, 'static/.gitignore'));
+    write('package.json', '{"type":"module","private":true}\n');
+    assert.equal(check(0, 'HEAD', true).scope, 'full');
+    git('restore', 'package.json');
 
     write('static/a.ts', '\n\nvoid first();\nvoid second();\n');
     assert.equal(
@@ -138,6 +208,11 @@ test('incubator compares real oxlint occurrences against exact Git source', () =
       0,
       'splitting a file preserves unchanged statements'
     );
+    assert.equal(
+      check(0, 'HEAD', true).introduced.length,
+      0,
+      'changed-file scans preserve moves into untracked files'
+    );
     write('static/copy.ts', 'void first();\n');
     const copied = check(1);
     assert.equal(copied.introduced.length, 1);
@@ -146,11 +221,24 @@ test('incubator compares real oxlint occurrences against exact Git source', () =
       'static/copy.ts',
       'same-path allowance is consumed before matching moved statements'
     );
+    assert.equal(check(1, 'HEAD', true).introduced[0].file, 'static/copy.ts');
     rmSync(path.join(root, 'static/copy.ts'));
     write('static/b.ts', 'void second();\nvoid second();\n');
     assert.equal(check(1).introduced.length, 1, 'each duplicate needs its own allowance');
     write('static/b.ts', 'void second();\n');
     commit();
+    git('mv', 'static/b.ts', 'static/renamed.ts');
+    const renamed = check(0, 'HEAD', true);
+    assert.equal(renamed.occurrences.length, 1);
+    assert.equal(renamed.introduced.length, 0, 'renames include both paths');
+    git('mv', 'static/renamed.ts', 'static/b.ts');
+    write('static/untracked copy.ts', 'void first();\n');
+    assert.equal(
+      check(1, 'HEAD', true).introduced.length,
+      1,
+      'an unchanged source cannot give its allowance to an untracked copy'
+    );
+    rmSync(path.join(root, 'static/untracked copy.ts'));
     write('static/a.ts', 'void   first();\n');
     assert.equal(
       check(1).introduced.length,
@@ -159,9 +247,11 @@ test('incubator compares real oxlint occurrences against exact Git source', () =
     );
     write('static/a.ts', '');
     assert.equal(check().introduced.length, 0);
+    assert.equal(check(0, 'HEAD', true).introduced.length, 0);
     commit();
     write('static/a.ts', 'void first();\n');
     assert.equal(check(1).introduced.length, 1, 'cleaned debt cannot be reintroduced');
+    assert.equal(check(1, 'HEAD', true).introduced.length, 1);
 
     rmSync(path.join(root, 'static/a.ts'));
     write(
@@ -199,6 +289,41 @@ test('incubator compares real oxlint occurrences against exact Git source', () =
     git('checkout', '-q', 'master');
     write('static/b.ts', '');
     const freshBase = commit();
+    git('update-ref', 'refs/remotes/origin/master', freshBase);
+    git('checkout', '-q', 'stale');
+    const local = JSON.parse(run(['check', '--json']).stdout);
+    assert.equal(local.base, historical);
+    assert.equal(
+      local.introduced.length,
+      0,
+      'base-only cleanup is not attributed to a stale local branch'
+    );
+    assert.equal(
+      check(1, 'origin/master').introduced.length,
+      1,
+      'an explicit base still compares the exact revision'
+    );
+    write('static/uncommitted.ts', 'void local();\n');
+    assert.equal(
+      JSON.parse(run(['check', '--changed', '--json'], 1).stdout).introduced.length,
+      1,
+      'local checks include untracked changes'
+    );
+    git('add', 'static/uncommitted.ts');
+    assert.equal(
+      JSON.parse(run(['check', '--changed', '--json'], 1).stdout).introduced.length,
+      1,
+      'local checks include staged changes'
+    );
+    write('static/uncommitted.ts', 'export const local = true;\n');
+    assert.equal(
+      JSON.parse(run(['check', '--changed', '--json']).stdout).introduced.length,
+      0,
+      'direct local checks include unstaged edits to staged files'
+    );
+    git('restore', '--staged', 'static/uncommitted.ts');
+    rmSync(path.join(root, 'static/uncommitted.ts'));
+    git('checkout', '-q', 'master');
     git('merge', '--no-ff', '-qm', 'Synthetic PR merge', 'stale');
     assert.equal(git('rev-parse', 'HEAD^1'), freshBase);
     write('static/b.ts', 'void second();\n');

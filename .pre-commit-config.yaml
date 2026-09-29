@@ -100,8 +100,12 @@ repos:
       - id: lint-incubator
         name: lint incubator
         language: system
-        files: ^(static/|scripts/lint-incubator(?:\.test)?\.ts$|oxlint\.config(?:\.incubator)?\.ts$|package\.json$|pnpm-lock\.yaml$|\.pre-commit-config\.yaml$)
-        entry: node scripts/lint-incubator.ts check
+        files: >-
+          (?x)^(static/|scripts/lint-incubator(?:\.test)?\.ts$|
+          oxlint\.config(?:\.incubator)?\.ts$|package\.json$|
+          pnpm-(?:lock|workspace)\.yaml$|tsconfig(?:\.[^/]*)?\.json$|
+          \.(?:gitignore|eslintignore|oxlintignore|node-version|pre-commit-config\.yaml)$)
+        entry: node scripts/lint-incubator.ts check --changed
         pass_filenames: false
         require_serial: true
 

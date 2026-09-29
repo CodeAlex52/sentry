@@ -337,6 +337,37 @@ test('incubator compares real oxlint occurrences against exact Git source', () =
       1,
       'exact synthetic merge parent detects restored debt'
     );
+    commit();
+    for (const file of [
+      '.gitignore',
+      '.eslintignore',
+      'static/.gitignore',
+      '.oxlintignore',
+    ]) {
+      const originalIgnore =
+        file === '.gitignore' ? readFileSync(path.join(root, file), 'utf8') : '';
+      write(
+        file,
+        originalIgnore + (file.startsWith('static/') ? 'b.ts\n' : 'static/b.ts\n')
+      );
+      commit();
+      check();
+      write(file, originalIgnore);
+      assert.equal(
+        check().introduced.length,
+        0,
+        `un-ignoring existing debt in ${file} uses current policy on both scans`
+      );
+      if (file !== '.gitignore') {
+        rmSync(path.join(root, file));
+        assert.equal(
+          check().introduced.length,
+          0,
+          `deleted ${file} stays deleted in base`
+        );
+      }
+      commit();
+    }
   } finally {
     rmSync(root, {recursive: true, force: true});
   }

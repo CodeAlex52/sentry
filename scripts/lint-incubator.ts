@@ -3,6 +3,7 @@ import {execFileSync, spawnSync} from 'node:child_process';
 import {createHash, randomUUID} from 'node:crypto';
 import {
   appendFileSync,
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -122,6 +123,23 @@ function changedFiles(root: string, base: string): string[] | undefined {
   return Buffer.byteLength(sources.join('\0')) > 32_000 ? undefined : sources;
 }
 
+function ignoreFiles(root: string, revision?: string): string[] {
+  return [
+    ...new Set(
+      git(
+        root,
+        revision
+          ? ['ls-tree', '-r', '--name-only', '-z', revision]
+          : ['ls-files', '--cached', '--others', '--exclude-standard', '-z']
+      )
+        .split('\0')
+        .filter(file =>
+          /^(?:static\/.*\/|static\/)?\.(?:git|eslint|oxlint)ignore$/.test(file)
+        )
+    ),
+  ].filter(file => revision || existsSync(path.join(root, file)));
+}
+
 function baselineCachePath(
   root: string,
   base: string,
@@ -155,10 +173,8 @@ function baselineCachePath(
     hash.update(readFileSync(new URL(import.meta.url)));
     hash.update(readFileSync(path.join(root, 'node_modules/.pnpm/lock.yaml')));
     const files = [
-      '.eslintignore',
-      '.gitignore',
+      ...ignoreFiles(root),
       '.node-version',
-      '.oxlintignore',
       'oxlint.config.ts',
       'oxlint.config.incubator.ts',
       'package.json',
@@ -543,6 +559,14 @@ async function main() {
         ]);
         const baseRoot = mkdtempSync(path.join(scratch, 'base-'));
         execFileSync('tar', ['-xf', archive, '-C', baseRoot]);
+        for (const file of ignoreFiles(root, base)) {
+          rmSync(path.join(baseRoot, file), {force: true});
+        }
+        for (const file of ignoreFiles(root)) {
+          const destination = path.join(baseRoot, file);
+          mkdirSync(path.dirname(destination), {recursive: true});
+          copyFileSync(path.join(root, file), destination);
+        }
         symlinkSync(
           path.join(root, 'node_modules'),
           path.join(baseRoot, 'node_modules'),

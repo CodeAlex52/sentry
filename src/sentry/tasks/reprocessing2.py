@@ -266,8 +266,11 @@ def handle_remaining_events(
         for cls in EVENT_MODELS_TO_MIGRATE:
             cls.objects.filter(project_id=project_id, event_id__in=event_ids).delete()
 
-        # Remove from nodestore
+        # Remove from nodestore, including the separate unprocessed copies
         node_ids = [Event.generate_node_id(project_id, event_id) for event_id in event_ids]
+        node_ids += [
+            Event.generate_unprocessed_node_id(project_id, event_id) for event_id in event_ids
+        ]
         nodestore.backend.delete_multi(node_ids)
 
         # Tell Snuba to delete the event data.

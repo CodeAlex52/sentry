@@ -247,17 +247,19 @@ def fetch_events_from_eventstore(
 
 
 def delete_events_from_nodestore(events: Sequence[Event], dataset: Dataset) -> None:
-    node_ids = [
-        Event.generate_node_id(
-            event.project_id,
-            (
-                event._snuba_data["occurrence_id"]
-                if dataset == Dataset.IssuePlatform
-                else event.event_id
-            ),
-        )
-        for event in events
-    ]
+    node_ids = []
+    for event in events:
+        if dataset == Dataset.IssuePlatform:
+            node_ids.append(
+                Event.generate_node_id(event.project_id, event._snuba_data["occurrence_id"])
+            )
+        else:
+            node_ids.append(Event.generate_node_id(event.project_id, event.event_id))
+            # The unprocessed copy may be a separate node ratehr than a subkey. In this
+            # case, deleting the event doesn't take the unprocessed copy with it.
+            # N.B.: non-error events won't have one.
+            node_ids.append(Event.generate_unprocessed_node_id(event.project_id, event.event_id))
+
     nodestore.backend.delete_multi(node_ids)
 
 

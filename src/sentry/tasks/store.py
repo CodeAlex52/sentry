@@ -33,6 +33,7 @@ from sentry.taskworker.namespaces import (
     issues_tasks,
 )
 from sentry.utils import metrics
+from sentry.utils.cache import event_from_cache_key
 from sentry.utils.event import track_event_since_received
 from sentry.utils.event_tracker import TransactionStageStatus, track_sampled_event
 from sentry.utils.safe import safe_execute
@@ -358,6 +359,11 @@ def do_process_event(
             "events.failed", tags={"reason": "cache", "stage": "process"}, skip_internal=False
         )
         error_logger.error("process.failed.empty", extra={"cache_key": cache_key})
+        # The unprocessed copy was written during preprocessing, and the event will
+        # never reach nodestore now.
+        event_ref = event_from_cache_key(cache_key)
+        if event_ref is not None:
+            reprocessing2.delete_unprocessed_event(*event_ref)
         return
 
     track_event_since_received(
@@ -579,6 +585,10 @@ def _do_save_event(
             metrics.incr(
                 "events.failed", tags={"reason": "cache", "stage": "post"}, skip_internal=False
             )
+            # The event will never reach nodestore, so its unprocessed copy is
+            # unreachable. This task does not retry.
+            if event_id and project_id:
+                reprocessing2.delete_unprocessed_event(project_id, event_id)
             return
 
         all_attachments = []
@@ -633,6 +643,12 @@ def _do_save_event(
             # Delete the event payload from cache since it won't show up in post-processing.
             if cache_key:
                 processing_store.delete_by_key(cache_key)
+
+            # Clean up the unprocessed copy from nodestore as it won't go through
+            # reprocessing. No-op if the unprocessed copy was stored in rc-processing as
+            # it will expire on its own.
+            if event_id:
+                reprocessing2.delete_unprocessed_event(project_id, event_id)
 
             # Mark all the attachments as `rate_limited`, so they are being properly cleaned up in the `finally` block:
             for attachment in all_attachments:

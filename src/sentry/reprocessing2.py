@@ -164,14 +164,27 @@ class CannotReprocess(Exception):
 
 def backup_unprocessed_event(data: Mapping[str, Any]) -> None:
     """
-    Backup unprocessed event payload into redis. Only call if event should be
-    able to be reprocessed.
+    Backup unprocessed event payload. Only call if event should be able to be
+    reprocessed.
     """
 
     if options.get("store.reprocessing-force-disable"):
         return
 
-    event_processing_store.store(dict(data), unprocessed=True)
+    if in_random_rollout("store.reprocessing-nodestore-backup.rollout"):
+        node_id = Event.generate_unprocessed_node_id(data["project"], data["event_id"])
+        nodestore.backend.set(node_id, dict(data))
+    else:
+        # Once the rollout is complete, this branch goes away along with the read in
+        # `_nodestore_save_many` that turns it into a subkey.
+        event_processing_store.store(dict(data), unprocessed=True)
+
+
+def delete_unprocessed_event(project_id: int, event_id: str) -> None:
+    """
+    Drop the unprocessed copy of an event that will never be saved.
+    """
+    nodestore.backend.delete(Event.generate_unprocessed_node_id(project_id, event_id))
 
 
 @dataclass
@@ -191,8 +204,23 @@ def pull_event_data(project_id: int, event_id: str) -> ReprocessableEvent:
         raise CannotReprocess("event.not_found")
 
     with start_span(op="reprocess_events.nodestore.get", name="reprocess_events.nodestore.get"):
-        node_id = Event.generate_node_id(project_id, event_id)
-        data = nodestore.backend.get(node_id, subkey="unprocessed")
+        # If `store.reprocessing-nodestore-backup.rollout` was active for an event, it was
+        # saved in nodestore as a separate node.
+        data = nodestore.backend.get(Event.generate_unprocessed_node_id(project_id, event_id))
+        source = "node"
+        if data is None:
+            # Fall back to reading the unprocessed copy from a subkey on the event node.
+            node_id = Event.generate_node_id(project_id, event_id)
+            data = nodestore.backend.get(node_id, subkey="unprocessed")
+            source = "subkey" if data is not None else "missing"
+
+        # Tracks which representation served the read, so the rollout can be verified and
+        # the subkey fallback removed once it stops being hit.
+        metrics.incr(
+            "reprocessing2.unprocessed_copy.read",
+            tags={"source": source},
+            sample_rate=1.0,
+        )
 
     # Check data after checking presence of event to avoid too many instances.
     if data is None:

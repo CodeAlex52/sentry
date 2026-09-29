@@ -6,6 +6,7 @@ from typing import Any
 import sentry_sdk
 from django.conf import settings
 
+from sentry import reprocessing2
 from sentry.killswitches import killswitch_matches_context
 from sentry.lang.native.processing import (
     get_native_symbolication_functions,
@@ -25,6 +26,7 @@ from sentry.tasks import store
 from sentry.tasks.base import instrumented_task
 from sentry.taskworker.namespaces import symbolication_tasks
 from sentry.utils import metrics
+from sentry.utils.cache import event_from_cache_key
 from sentry.utils.sdk import set_current_event_project
 from sentry.utils.tracing import set_span_data, start_span
 
@@ -75,6 +77,11 @@ def _do_symbolicate_event(
             "events.failed", tags={"reason": "cache", "stage": "symbolicate"}, skip_internal=False
         )
         error_logger.error("symbolicate.failed.empty", extra={"cache_key": cache_key})
+        # The unprocessed copy was written just before this task was queued, and the
+        # event will never reach nodestore now.
+        event_ref = event_from_cache_key(cache_key)
+        if event_ref is not None:
+            reprocessing2.delete_unprocessed_event(*event_ref)
         return
 
     event_id = str(data["event_id"])

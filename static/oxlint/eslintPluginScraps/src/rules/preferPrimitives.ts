@@ -92,11 +92,14 @@ function stylePrimitive(
   }
   const supportsLayout = [...elements].every(element => LAYOUT_ELEMENTS.has(element));
   const display = declarations.get('display');
-  if (supportsLayout && (display === 'flex' || display === 'inline-flex')) {
+  if (display === 'flex' || display === 'inline-flex') {
+    if (!supportsLayout) {
+      return undefined;
+    }
     return declarations.get('flex-direction') === 'column' ? 'Stack' : 'Flex';
   }
-  if (supportsLayout && (display === 'grid' || display === 'inline-grid')) {
-    return 'Grid';
+  if (display === 'grid' || display === 'inline-grid') {
+    return supportsLayout ? 'Grid' : undefined;
   }
   if (
     [...elements].every(element => TEXT_ELEMENTS.has(element)) &&
@@ -403,7 +406,9 @@ export const preferPrimitives = defineRule({
           const name =
             property.key.type === 'Identifier'
               ? property.key.name
-              : staticValue(property.key);
+              : property.key.type === 'Literal' && typeof property.key.value === 'string'
+                ? property.key.value
+                : null;
           if (name !== null) {
             declarations.set(normalizePropertyName(name), staticValue(property.value));
           }

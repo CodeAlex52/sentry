@@ -39,6 +39,10 @@ function invalid(
 
 ruleTester.run('prefer-primitives', preferPrimitives, {
   valid: [
+    ...['p', 'time', 'legend'].map(element => ({
+      name: `layout display on ${element} cannot fall through to Text`,
+      code: `${emotion} const F = styled.${element}\`display:flex;font-size:12px;color:red;\`; const G = <${element} style={{display:'grid',fontSize:12,color:'red'}}/>;`,
+    })),
     ...['a', 'input', 'svg'].map(element => ({
       name: `layout primitives cannot preserve an unsupported ${element} tag`,
       code: `${emotion} const F = styled.${element}\`display:flex;\`; const S = styled.${element}\`display:flex;flex-direction:column;\`; const G = <${element} style={{display:'grid'}}/>; const C = <${element} style={{padding:8,borderRadius:4}}/>;`,
@@ -167,6 +171,21 @@ ruleTester.run('prefer-primitives', preferPrimitives, {
     },
   ],
   invalid: [
+    invalid(
+      'quoted camelCase typography keys',
+      '<span style={{"fontSize":14,"fontWeight":500}}/>',
+      'Text'
+    ),
+    invalid(
+      'quoted camelCase container keys',
+      '<div style={{"backgroundColor":"red","borderRadius":4}}/>',
+      'Container'
+    ),
+    invalid(
+      'quoted camelCase flex direction',
+      '<div style={{display:"flex","flexDirection":"column"}}/>',
+      'Stack'
+    ),
     invalid('td is a supported layout tag', '<td style={{display:"grid"}}/>', 'Grid'),
     invalid(
       'generic intrinsic styled template',

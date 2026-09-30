@@ -42,6 +42,9 @@ export function InvitationAuthentication({
         exit={{opacity: 0, y: 10}}
         transition={theme.motion.framer.smooth.moderate}
       >
+        {activeMode === 'register' && (
+          <Text as="p">{t('Create a new account to accept this invite.')}</Text>
+        )}
         {activeMode === 'register' ? (
           <RegistrationForm
             hasNewsletter={authConfig?.hasNewsletter ?? false}
@@ -64,6 +67,9 @@ export function InvitationAuthentication({
           />
         ) : (
           <Stack gap="lg">
+            {!pendingMfaMethods && (
+              <Text as="p">{t('Sign in to your account to accept this invite.')}</Text>
+            )}
             <AccountAuthentication
               authConfig={authConfig}
               mfaMethods={pendingMfaMethods}
